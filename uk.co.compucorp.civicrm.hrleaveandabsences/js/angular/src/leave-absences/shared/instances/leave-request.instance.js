@@ -8,33 +8,14 @@ define([
 ], function (_, instances) {
   'use strict';
 
-  instances.factory('LeaveRequestInstance', ['$q', 'checkPermissions', 'OptionGroup',
-    'shared-settings', 'ModelInstance', 'LeaveRequestAPI',
-    function ($q, checkPermissions, OptionGroup, sharedSettings, ModelInstance, LeaveRequestAPI) {
+  instances.factory('LeaveRequestInstance', ['$q', 'checkPermissions',
+    'LeaveRequestAPI', 'ModelInstance', 'OptionGroup', 'shared-settings',
+    function ($q, checkPermissions, LeaveRequestAPI, ModelInstance, OptionGroup, sharedSettings) {
       /**
-       * Amends the first and last days of the balance by setting values from the
-       * selected time deductions. It also re-calculates the total amount.
+       * Changes leave request status
        *
-       * @param  {Object} balanceChange
-       */
-      function recalculateBalanceChange (balanceChange) {
-        _.first(_.values(balanceChange.breakdown)).amount = this['from_date_amount'];
-
-        if (balanceChange.breakdown.length > 1) {
-          _.last(_.values(balanceChange.breakdown)).amount = this['to_date_amount'];
-        }
-
-        balanceChange.amount = _.reduce(balanceChange.breakdown,
-          function (updatedChange, day) {
-            return updatedChange - day.amount;
-          }, 0);
-      }
-
-      /**
-       * Update status ID
-       *
-       * @param {string} status - name of the option value
-       * @return {Promise} Resolved with {Object} - Error Data in case of error
+       * @param  {String} status - name of the option value
+       * @return {Promise} resolves with {Object} or Error Data in case of error
        */
       function changeLeaveStatus (status) {
         return getOptionIDByName(status)
@@ -53,10 +34,10 @@ define([
       }
 
       /**
-       * Checks if a LeaveRequest is of a specific type
+       * Checks if the leave request has the given status
        *
-       * @param {string} statusName - name of the option value
-       * @return {Promise} Resolved with {Boolean}
+       * @param  {String} statusName - name of the option value
+       * @return {Promise} resolves with {Boolean}
        */
       function checkLeaveStatus (statusName) {
         return getOptionIDByName(statusName)
@@ -84,9 +65,9 @@ define([
       }
 
       /**
-       * Get ID of an option value
+       * Gets ID of an option value
        *
-       * @param {string} name - name of the option value
+       * @param  {String} name - name of the option value
        * @return {Promise} Resolved with {Object} - Specific leave request
        */
       function getOptionIDByName (name) {
@@ -99,7 +80,27 @@ define([
       }
 
       /**
-       * Save comments which do not have an ID and delete comments which are marked for deletion
+       * Amends the first and last days of the balance by setting values from the
+       * selected time deductions. It also re-calculates the total amount.
+       *
+       * @param {Object} balanceChange
+       */
+      function recalculateBalanceChange (balanceChange) {
+        _.first(_.values(balanceChange.breakdown)).amount = this['from_date_amount'];
+
+        if (balanceChange.breakdown.length > 1) {
+          _.last(_.values(balanceChange.breakdown)).amount = this['to_date_amount'];
+        }
+
+        balanceChange.amount = _.reduce(balanceChange.breakdown,
+          function (updatedChange, day) {
+            return updatedChange - day.amount;
+          }, 0);
+      }
+
+      /**
+       * Saves comments which do not have an ID and
+       * deletes comments which are marked for deletion
        *
        * @return {Promise}
        */
@@ -129,25 +130,18 @@ define([
       return ModelInstance.extend({
 
         /**
-         * Returns the default custom data (as in, not given by the API)
-         * with its default values
-         *
-         * @return {object}
+         * Approves the leave request
          */
-        defaultCustomData: function () {
-          return {
-            comments: [],
-            files: [],
-            request_type: 'leave'
-          };
+        approve: function () {
+          return changeLeaveStatus.call(this, sharedSettings.statusNames.approved);
         },
 
         /**
-         * Gets the current balance change according to a current work pattern
+         * Gets the current balance change according to the current work pattern
          *
          * @param  {String} calculationUnit (days|hours)
          * @return {Promise} resolves to an object containing
-         *   a balance change amount and a detailed breakdown
+         * a balance change amount and a detailed breakdown
          */
         calculateBalanceChange: function (calculationUnit) {
           var params = ['contact_id', 'from_date', 'to_date', 'type_id', 'from_date_type', 'to_date_type'];
@@ -167,53 +161,17 @@ define([
         },
 
         /**
-         * Cancel a leave request
+         * Cancels the leave request
          */
         cancel: function () {
           return changeLeaveStatus.call(this, sharedSettings.statusNames.cancelled);
         },
 
         /**
-         * Approve a leave request
-         */
-        approve: function () {
-          return changeLeaveStatus.call(this, sharedSettings.statusNames.approved);
-        },
-
-        /**
-         * Reject a leave request
-         */
-        reject: function () {
-          return changeLeaveStatus.call(this, sharedSettings.statusNames.rejected);
-        },
-
-        /**
-         * Sends a leave request back as more information is required
-         */
-        sendBack: function () {
-          return changeLeaveStatus.call(this, sharedSettings.statusNames.moreInformationRequired);
-        },
-
-        /**
-         * Update a leave request
+         * Creates a new leave request by saving it to the server
          *
-         * @return {Promise} Resolved with {Object} Updated Leave request
-         */
-        update: function () {
-          return LeaveRequestAPI.update(this.toAPI())
-            .then(function () {
-              return $q.all([
-                saveAndDeleteComments.call(this),
-                deleteAttachments.call(this)
-              ]);
-            }.bind(this));
-        },
-
-        /**
-         * Create a new leave request
-         *
-         * @return {Promise} Resolved with {Object} Created Leave request with
-         *  newly created id for this instance
+         * @return {Promise} resolves with {Object} Created Leave request with
+         * the newly created ID for this instance
          */
         create: function () {
           return LeaveRequestAPI.create(this.toAPI())
@@ -227,8 +185,32 @@ define([
         },
 
         /**
-         * Sets the flag to mark file for deletion. The file is not yet deleted
-         * from the server.
+         * Returns the default custom data (as in, not given by the API)
+         * with its default values
+         *
+         * @return {object}
+         */
+        defaultCustomData: function () {
+          return {
+            comments: [],
+            files: [],
+            request_type: 'leave',
+            type_title: 'Leave'
+          };
+        },
+
+        /**
+         * Deletes the leave request from the server
+         *
+         * @return {Promise}
+         */
+        delete: function () {
+          return LeaveRequestAPI.delete(this.id);
+        },
+
+        /**
+         * Sets the flag to mark file for deletion.
+         * @NOTE The file is not yet deleted from the server.
          *
          * @param {Object} file - Attachment object
          */
@@ -239,29 +221,22 @@ define([
         },
 
         /**
-         * Removes a comment from memory
+         * Flags a comment to be deleted if it is already saved on the server.
+         * If it is not yet saved on the server, removes it from the collection.
          *
-         * @param {Object} commentObj - comment object
+         * @param {Object} commentObject - comment object
          */
-        deleteComment: function (commentObj) {
-          // If its an already saved comment, mark a toBeDeleted flag
-          if (commentObj.comment_id) {
-            commentObj.toBeDeleted = true;
+        deleteComment: function (commentObject) {
+          if (commentObject.comment_id) {
+            commentObject.toBeDeleted = true;
+
             return;
           }
 
           this.comments = _.reject(this.comments, function (comment) {
-            return commentObj.created_at === comment.created_at && commentObj.text === comment.text;
+            return commentObject.created_at === comment.created_at &&
+              commentObject.text === comment.text;
           });
-        },
-
-        /**
-         * Deletes the leave request
-         *
-         * @return {Promise}
-         */
-        delete: function () {
-          return LeaveRequestAPI.delete(this.id);
         },
 
         /**
@@ -293,7 +268,7 @@ define([
 
         /**
          * Gets info about work day for the date specified
-         *   for the contact the leave request belongs to
+         * for the contact the leave request belongs to
          *
          * @param {String} date in the "YYYY-MM-DD" format
          */
@@ -308,16 +283,6 @@ define([
         },
 
         /**
-         * Validate leave request instance attributes.
-         *
-         * @return {Promise} empty array if no error found otherwise an object
-         *  with is_error set and array of errors
-         */
-        isValid: function () {
-          return LeaveRequestAPI.isValid(this.toAPI());
-        },
-
-        /**
          * Checks if a LeaveRequest is Approved.
          *
          * @return {Promise} resolved with {Boolean}
@@ -327,34 +292,35 @@ define([
         },
 
         /**
-         * Checks if a LeaveRequest is AwaitingApproval.
+         * Checks if the leave request has the "Awaiting Approval" status
          *
-         * @return {Promise} resolved with {Boolean}
+         * @return {Promise} resolves with {Boolean}
          */
         isAwaitingApproval: function () {
           return checkLeaveStatus.call(this, sharedSettings.statusNames.awaitingApproval);
         },
 
         /**
-         * Checks if a LeaveRequest is cancelled.
+         * Checks if the leave request is cancelled
          *
-         * @return {Promise} resolved with {Boolean}
+         * @return {Promise} resolves with {Boolean}
          */
         isCancelled: function () {
           return checkLeaveStatus.call(this, sharedSettings.statusNames.cancelled);
         },
 
         /**
-         * Checks if a LeaveRequest is Rejected.
+         * Checks if the leave request is rejected
          *
-         * @return {Promise} resolved with {Boolean}
+         * @return {Promise} resolves with {Boolean}
          */
         isRejected: function () {
           return checkLeaveStatus.call(this, sharedSettings.statusNames.rejected);
         },
 
         /**
-         * Checks if a LeaveRequest is Sent Back.
+         * Checks if the leave request is sent back
+         * (has "More Information Required status")
          *
          * @return {Promise} resolved with {Boolean}
          */
@@ -363,7 +329,34 @@ define([
         },
 
         /**
-         * Loads comments for this leave request.
+         * Validates the leave request instance attributes
+         *
+         * @return {Promise} empty array if no error found otherwise an object
+         * with is_error set and array of errors
+         */
+        isValid: function () {
+          return LeaveRequestAPI.isValid(this.toAPI());
+        },
+
+        /**
+         * Loads file attachments associated with the leave request
+         *
+         * @return {Promise} resolves with array of attachments
+         * if the leave request is already created, otherwise with an empty promise
+         */
+        loadAttachments: function () {
+          if (this.id) {
+            return LeaveRequestAPI.getAttachments(this.id)
+              .then(function (attachments) {
+                this.files = attachments;
+              }.bind(this));
+          }
+
+          return $q.resolve();
+        },
+
+        /**
+         * Loads comments for the leave request
          *
          * @return {Promise}
          */
@@ -379,10 +372,17 @@ define([
         },
 
         /**
-         * Check the role of a given contact in relationship to the leave request.
+         * Rejects the leave request
+         */
+        reject: function () {
+          return changeLeaveStatus.call(this, sharedSettings.statusNames.rejected);
+        },
+
+        /**
+         * Checks the role of a given contact in relationship to the leave request
          *
-         * @param {Object} contactId
-         * @return {Promise} resolves with an {String} - owner/admin/manager/none
+         * @param  {Object} contactId
+         * @return {Promise} resolves with a {String} - owner/admin/manager/none
          */
         roleOf: function (contactId) {
           return (this.contact_id === contactId)
@@ -399,7 +399,15 @@ define([
         },
 
         /**
-         * Override of parent method
+         * Sends the leave request back
+         * (sets "More Information Required status)
+         */
+        sendBack: function () {
+          return changeLeaveStatus.call(this, sharedSettings.statusNames.moreInformationRequired);
+        },
+
+        /**
+         * Overrides the parent toAPIFilter() method
          *
          * @param {object} result - The accumulator object
          * @param {string} key - The property name
@@ -411,19 +419,18 @@ define([
         },
 
         /**
-         * Loads file attachments associated with this leave request
+         * Updates the leave request
          *
-         * @return {Promise} with array of attachments if leave request is already created else empty promise
+         * @return {Promise} resolves with {Object} - updated leave request
          */
-        loadAttachments: function () {
-          if (this.id) {
-            return LeaveRequestAPI.getAttachments(this.id)
-              .then(function (attachments) {
-                this.files = attachments;
-              }.bind(this));
-          }
-
-          return $q.resolve();
+        update: function () {
+          return LeaveRequestAPI.update(this.toAPI())
+            .then(function () {
+              return $q.all([
+                saveAndDeleteComments.call(this),
+                deleteAttachments.call(this)
+              ]);
+            }.bind(this));
         }
       });
     }

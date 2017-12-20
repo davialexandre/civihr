@@ -25,11 +25,11 @@ define([
 
   RequestCtrl.$inject = ['$log', '$q', '$rootScope', '$scope', '$uibModalInstance', 'checkPermissions', 'api.optionGroup',
     'dialog', 'pubSub', 'directiveOptions', 'Contact', 'Session', 'AbsencePeriod', 'AbsenceType', 'Entitlement',
-    'LeaveRequest', 'LeaveRequestInstance', 'shared-settings', 'SicknessRequestInstance', 'TOILRequestInstance'];
+    'LeaveRequest', 'LeaveRequestInstance', 'notificationService', 'shared-settings', 'SicknessRequestInstance', 'TOILRequestInstance'];
 
   function RequestCtrl ($log, $q, $rootScope, $scope, $modalInstance, checkPermissions, OptionGroup, dialog, pubSub,
     directiveOptions, Contact, Session, AbsencePeriod, AbsenceType, Entitlement, LeaveRequest,
-    LeaveRequestInstance, sharedSettings, SicknessRequestInstance, TOILRequestInstance) {
+    LeaveRequestInstance, notification, sharedSettings, SicknessRequestInstance, TOILRequestInstance) {
     $log.debug('RequestCtrl');
 
     var absenceTypesAndIds;
@@ -793,6 +793,17 @@ define([
     }
 
     /**
+     * Shows message about request saving success
+     */
+    function showRequestSavingSuccessMessage () {
+      notification.success(
+        vm.request.type_title + ' request ' +
+        (vm.mode === 'create' ? 'created' : 'updated') +
+        ' successfully'
+      );
+    }
+
+    /**
      * Submits the form, only if the leave request is valid, also emits event
      * to notify event subscribers about the the save.
      * Updates request based on role and mode
@@ -815,6 +826,7 @@ define([
         .then(function () {
           return vm.isMode('edit') ? updateRequest() : createRequest();
         })
+        .then(showRequestSavingSuccessMessage)
         .catch(function (errors) {
           // if there is an error, put back the original status
           vm.request.status_id = originalStatus;
