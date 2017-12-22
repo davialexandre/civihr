@@ -23,3 +23,9 @@
     position: relative;
   }
 }
+
+[data-job-roles] {
+  .container {
+    max-width: 100%;
+  }
+}
