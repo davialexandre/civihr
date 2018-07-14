@@ -4,22 +4,16 @@
   define([
     'common/lodash',
     'common/moment',
-    'mocks/data/option-group-mock-data',
-    'mocks/data/leave-request-data',
-    'mocks/helpers/helper',
-    'common/modules/dialog',
-    'leave-absences/shared/config',
+    'leave-absences/mocks/data/option-group.data',
+    'leave-absences/mocks/data/leave-request.data',
+    'leave-absences/manager-leave/app',
     'common/mocks/services/hr-settings-mock',
-    'common/mocks/services/file-uploader-mock',
-    'mocks/apis/absence-period-api-mock',
-    'mocks/apis/absence-type-api-mock',
-    'mocks/apis/entitlement-api-mock',
-    'mocks/apis/work-pattern-api-mock',
-    'mocks/apis/leave-request-api-mock',
-    'mocks/apis/option-group-api-mock',
-    'common/mocks/services/api/contact-mock',
-    'common/services/pub-sub',
-    'leave-absences/shared/modules/shared-settings'
+    'leave-absences/mocks/apis/absence-period-api-mock',
+    'leave-absences/mocks/apis/absence-type-api-mock',
+    'leave-absences/mocks/apis/entitlement-api-mock',
+    'leave-absences/mocks/apis/leave-request-api-mock',
+    'leave-absences/mocks/apis/option-group-api-mock',
+    'leave-absences/mocks/apis/work-pattern-api-mock'
   ], function (_, moment, optionGroupMock, mockData) {
     'use strict';
 
@@ -27,7 +21,7 @@
       var $log, $rootScope, controller, modalInstanceSpy, $scope, $q, dialog, $controller,
         $provide, sharedSettings, AbsenceTypeAPI, AbsencePeriodAPI, LeaveRequestInstance,
         Contact, ContactAPIMock, EntitlementAPI, LeaveRequestAPI, pubSub,
-        WorkPatternAPI;
+        requiredTab, WorkPatternAPI;
       var role = 'staff'; // change this value to set other roles
 
       beforeEach(module('leave-absences.templates', 'leave-absences.controllers',
@@ -105,6 +99,13 @@
         spyOn(EntitlementAPI, 'all').and.callThrough();
 
         modalInstanceSpy = jasmine.createSpyObj('modalInstanceSpy', ['dismiss', 'close']);
+        requiredTab = {
+          isRequired: true,
+          canSubmit: function () {
+            return true;
+          },
+          onBeforeSubmit: jasmine.createSpy('onBeforeSubmit').and.returnValue($q.resolve())
+        };
       }));
 
       describe('staff opens request popup', function () {
@@ -160,9 +161,13 @@
             });
 
             it('gets absence types with false sick param', function () {
-              expect(AbsenceTypeAPI.all).toHaveBeenCalledWith({
+              expect(AbsenceTypeAPI.all).toHaveBeenCalledWith(jasmine.objectContaining({
                 is_sick: false
-              });
+              }));
+            });
+
+            it('allows to change absence type', function () {
+              expect(controller.canChangeAbsenceType()).toBeTruthy();
             });
 
             describe('leave request instance', function () {
@@ -177,6 +182,45 @@
               it('does not have from/to dates set', function () {
                 expect(controller.request.from_date).toBeUndefined();
                 expect(controller.request.to_date).toBeUndefined();
+              });
+            });
+          });
+
+          describe('on absence period change', function () {
+            beforeEach(function () {
+              $rootScope.$broadcast('LeaveRequestPopup::absencePeriodChanged');
+            });
+
+            it('starts reloading entitlements', function () {
+              expect(controller.loading.entitlements).toBeTruthy();
+            });
+
+            it('does not allow to change absence type before entitlemenets are updated', function () {
+              expect(controller.canChangeAbsenceType()).toBeFalsy();
+            });
+
+            describe('once it started reloading entitlements', function () {
+              beforeEach(function () {
+                spyOn($rootScope, '$emit').and.callThrough();
+                $rootScope.$digest();
+              });
+
+              it('loads entitlements for the selected period', function () {
+                expect(EntitlementAPI.all).toHaveBeenCalledWith(jasmine.objectContaining({
+                  period_id: controller.period.id
+                }), true);
+              });
+
+              it('finishes loading entitlements', function () {
+                expect(controller.loading.entitlements).toBeFalsy();
+              });
+
+              it('broadcasts absence types with updated entitlements back', function () {
+                expect($rootScope.$emit).toHaveBeenCalledWith('LeaveRequestPopup::absencePeriodBalancesUpdated', controller.absenceTypes);
+              });
+
+              it('allows to change absence type again', function () {
+                expect(controller.canChangeAbsenceType()).toBeTruthy();
               });
             });
           });
@@ -202,7 +246,7 @@
               expect(controller.submitting).toBeTruthy();
             });
 
-            it('submit does not create request again', function () {
+            it('does not create request again', function () {
               spyOn(controller.request, 'create').and.callThrough();
               controller.submit();
               expect(controller.request.create).not.toHaveBeenCalled();
@@ -211,6 +255,8 @@
 
           describe('when submit with invalid fields', function () {
             beforeEach(function () {
+              requiredTab.canSubmit = function () { return false; };
+              $scope.$emit('LeaveRequestPopup::addTab', requiredTab);
               controller.submit();
               $scope.$digest();
             });
@@ -229,23 +275,85 @@
               LeaveRequestAPI.isValid.and.returnValue($q.resolve());
               LeaveRequestAPI.create.and.returnValue($q.resolve({ id: '1' }));
               controller.balance.closing = 1;
-
-              controller.submit();
-              $scope.$digest();
+              controller.request.from_date_amount = 1;
+              controller.request.to_date_amount = 1;
+              controller.request.from_date_type = 1;
+              controller.request.to_date_type = 1;
             });
 
-            it('is successful', function () {
-              expect(controller.errors.length).toBe(0);
-              expect(controller.request.id).toBeDefined();
+            describe('basic tests', function () {
+              var hasCalledRequestCreateMethod, nonRequiredTab;
+
+              beforeEach(function () {
+                nonRequiredTab = {
+                  onBeforeSubmit: jasmine.createSpy('onBeforeSubmit').and.returnValue($q.resolve())
+                };
+
+                requiredTab.onBeforeSubmit.and.callFake(function () {
+                  hasCalledRequestCreateMethod = LeaveRequestAPI.create.calls.count() > 0;
+
+                  return $q.resolve();
+                });
+                $scope.$emit('LeaveRequestPopup::addTab', requiredTab);
+                $scope.$emit('LeaveRequestPopup::addTab', nonRequiredTab);
+                controller.submit();
+                $scope.$digest();
+              });
+
+              it('is successful', function () {
+                expect(controller.errors.length).toBe(0);
+                expect(controller.request.id).toBeDefined();
+              });
+
+              it('submits all tabs', function () {
+                expect(requiredTab.onBeforeSubmit).toHaveBeenCalled();
+                expect(nonRequiredTab.onBeforeSubmit).toHaveBeenCalled();
+              });
+
+              it('submits all tabs before saving the request', function () {
+                expect(hasCalledRequestCreateMethod).toBe(false);
+              });
+
+              it('calls corresponding API end points', function () {
+                expect(LeaveRequestAPI.isValid).toHaveBeenCalled();
+                expect(LeaveRequestAPI.create).toHaveBeenCalled();
+              });
+
+              it('sends event', function () {
+                expect(pubSub.publish).toHaveBeenCalledWith('LeaveRequest::new', controller.request);
+              });
+
+              it('does not send leave in hours parameters to the server', function () {
+                expect(controller.request['from_date_amount']).not.toBeDefined();
+                expect(controller.request['to_date_amount']).not.toBeDefined();
+              });
+
+              describe('when one of the tabs fails to submit', function () {
+                beforeEach(function () {
+                  nonRequiredTab.onBeforeSubmit.and.returnValue($q.reject());
+                  LeaveRequestAPI.create.calls.reset();
+                  controller.submit();
+                  $scope.$digest();
+                });
+
+                it('does not save the leave request', function () {
+                  expect(LeaveRequestAPI.create).not.toHaveBeenCalled();
+                });
+              });
             });
 
-            it('calls corresponding API end points', function () {
-              expect(LeaveRequestAPI.isValid).toHaveBeenCalled();
-              expect(LeaveRequestAPI.create).toHaveBeenCalled();
-            });
+            describe('when calculation unit is "hours"', function () {
+              beforeEach(function () {
+                controller.selectedAbsenceType.calculation_unit_name = 'hours';
 
-            it('sends event', function () {
-              expect(pubSub.publish).toHaveBeenCalledWith('LeaveRequest::new', controller.request);
+                controller.submit();
+                $scope.$digest();
+              });
+
+              it('does not send deduction in hours parameters to the server', function () {
+                expect(controller.request['from_date_type']).not.toBeDefined();
+                expect(controller.request['from_date_type']).not.toBeDefined();
+              });
             });
           });
         });
@@ -256,9 +364,11 @@
             var leaveRequest = LeaveRequestInstance.init(mockData.findBy('status_id', status));
 
             leaveRequest.contact_id = CRM.vars.leaveAndAbsences.contactId.toString();
-            leaveRequest.fileUploader = { queue: [] };
 
-            initTestController({ leaveRequest: leaveRequest });
+            initTestController({
+              mode: 'edit',
+              leaveRequest: leaveRequest
+            });
           });
 
           it('does not allow to submit the leave request without changes', function () {
@@ -268,13 +378,81 @@
           describe('when a comment is added', function () {
             beforeEach(function () {
               controller.request.comments.push(jasmine.any(Object));
-              controller.checkSubmitConditions = jasmine.createSpy('checkSubmitConditions');
-              controller.checkSubmitConditions.and.returnValue(true);
             });
 
             it('allows to submit the leave request', function () {
               expect(controller.canSubmit()).toBe(true);
             });
+          });
+
+          describe('tabs', function () {
+            describe('on create', function () {
+              beforeEach(function () {
+                controller.mode = 'create';
+              });
+
+              describe('when all required tabs can be submitted', function () {
+                beforeEach(function () {
+                  $scope.$emit('LeaveRequestPopup::addTab', requiredTab);
+                  $scope.$emit('LeaveRequestPopup::addTab', requiredTab);
+                  $scope.$emit('LeaveRequestPopup::addTab', { canSubmit: returnFalse });
+                });
+
+                it('allows to submit the leave request', function () {
+                  expect(controller.canSubmit()).toBe(true);
+                });
+              });
+
+              describe('when not all required tabs can be submitted', function () {
+                beforeEach(function () {
+                  $scope.$emit('LeaveRequestPopup::addTab', { isRequired: true, canSubmit: returnFalse });
+                  $scope.$emit('LeaveRequestPopup::addTab', { isRequired: true, canSubmit: returnTrue });
+                  $scope.$emit('LeaveRequestPopup::addTab', { canSubmit: returnTrue });
+                });
+
+                it('does not allow to submit the leave request', function () {
+                  expect(controller.canSubmit()).toBe(false);
+                });
+              });
+            });
+
+            describe('on edit', function () {
+              beforeEach(function () {
+                controller.mode = 'edit';
+              });
+
+              describe('when some of the non-required tabs can be submitted', function () {
+                beforeEach(function () {
+                  $scope.$emit('LeaveRequestPopup::addTab', requiredTab);
+                  $scope.$emit('LeaveRequestPopup::addTab', { canSubmit: returnTrue });
+                  $scope.$emit('LeaveRequestPopup::addTab', { canSubmit: returnFalse });
+                });
+
+                it('allows to submit the leave request', function () {
+                  expect(controller.canSubmit()).toBe(true);
+                });
+              });
+
+              describe('when none of the non-required tabs can be submitted', function () {
+                beforeEach(function () {
+                  $scope.$emit('LeaveRequestPopup::addTab', requiredTab);
+                  $scope.$emit('LeaveRequestPopup::addTab', { canSubmit: returnFalse });
+                  $scope.$emit('LeaveRequestPopup::addTab', { canSubmit: returnFalse });
+                });
+
+                it('does not allow to submit the leave request', function () {
+                  expect(controller.canSubmit()).toBe(false);
+                });
+              });
+            });
+
+            function returnTrue () {
+              return true;
+            }
+
+            function returnFalse () {
+              return false;
+            }
           });
         });
 
@@ -298,6 +476,10 @@
             expect(controller.request.contact_id).toEqual(leaveRequest.contact_id);
           });
 
+          it('does not allow to change absence type', function () {
+            expect(controller.canChangeAbsenceType()).toBeFalsy();
+          });
+
           describe('on submit', function () {
             beforeEach(function () {
               spyOn(controller.request, 'update').and.callThrough();
@@ -313,12 +495,13 @@
 
         describe('when user edits leave request', function () {
           describe('without comments', function () {
+            var leaveRequest;
+
             beforeEach(function () {
               var status = optionGroupMock.specificValue('hrleaveandabsences_leave_request_status', 'value', '3');
-              var leaveRequest = LeaveRequestInstance.init(mockData.findBy('status_id', status));
+              leaveRequest = LeaveRequestInstance.init(mockData.findBy('status_id', status));
 
               leaveRequest.contact_id = CRM.vars.leaveAndAbsences.contactId.toString();
-              leaveRequest.fileUploader = { queue: [] };
 
               spyOn(controller.request, 'update').and.callThrough();
               initTestController({ leaveRequest: leaveRequest });
@@ -335,10 +518,10 @@
                 expect(controller.request.contact_id).toEqual('' + CRM.vars.leaveAndAbsences.contactId);
                 expect(controller.request.type_id).toEqual('1');
                 expect(controller.request.status_id).toEqual(waitingApprovalStatus.value);
-                expect(controller.request.from_date).toEqual('2016-11-23');
-                expect(controller.request.from_date_type).toEqual('1');
-                expect(controller.request.to_date).toEqual('2016-11-28');
-                expect(controller.request.to_date_type).toEqual('1');
+                expect(controller.request.from_date).toEqual(leaveRequest.from_date);
+                expect(controller.request.from_date_type).toEqual(leaveRequest.from_date_type);
+                expect(controller.request.to_date).toEqual(leaveRequest.to_date);
+                expect(controller.request.to_date_type).toEqual(leaveRequest.to_date_type);
               });
 
               it('does not allow user to submit', function () {
@@ -405,7 +588,7 @@
         });
       });
 
-      describe('manager opens leave request popup', function () {
+      describe('manager opens leave request popup in edit mode', function () {
         beforeEach(function () {
           var status = optionGroupMock.specificValue('hrleaveandabsences_leave_request_status', 'value', '3');
           var leaveRequest = LeaveRequestInstance.init(mockData.findBy('status_id', status));
@@ -420,7 +603,6 @@
           var waitingApprovalStatus;
 
           beforeEach(function () {
-            controller.request.fileUploader = { queue: [] };
             waitingApprovalStatus = optionGroupMock.specificObject('hrleaveandabsences_leave_request_status', 'value', '3');
           });
 
@@ -445,6 +627,10 @@
           it('does not allow user to submit', function () {
             expect(controller.canSubmit()).toBeFalsy();
           });
+
+          it('does not allow to change absence type', function () {
+            expect(controller.canChangeAbsenceType()).toBeFalsy();
+          });
         });
 
         describe('on submit', function () {
@@ -463,9 +649,6 @@
             }
             // set status id manually as manager would set it on UI
             controller.newStatusOnSave = optionGroupMock.specificValue('hrleaveandabsences_leave_request_status', 'value', '1');
-
-            controller.checkSubmitConditions = jasmine.createSpy('checkSubmitConditions');
-            controller.checkSubmitConditions.and.returnValue(true);
 
             controller.submit();
           });
@@ -526,12 +709,7 @@
 
               it('initiates the balance change recalculation', function () {
                 expect($rootScope.$emit).toHaveBeenCalledWith(
-                  'LeaveRequestPopup::updateBalance');
-              });
-
-              it('recalculates the balance', function () {
-                expect(controller.request.calculateBalanceChange).toHaveBeenCalledWith(
-                  controller.selectedAbsenceType.calculation_unit_name);
+                  'LeaveRequestPopup::recalculateBalanceChange');
               });
             });
           });
@@ -675,6 +853,29 @@
 
           it('does not load contacts', function () {
             expect(controller.managedContacts.length).toEqual(0);
+          });
+
+          it('selects the absence period that contains the leave request dates', function () {
+            expect(moment(controller.period.start_date).isSameOrBefore(
+              moment(controller.request.from_date))).toBeTruthy();
+            expect(moment(controller.period.end_date).isSameOrAfter(
+              moment(controller.request.to_date))).toBeTruthy();
+          });
+        });
+      });
+
+      describe('admin opens leave request popup in view mode', function () {
+        beforeEach(function () {
+          var status = optionGroupMock.specificValue('hrleaveandabsences_leave_request_status', 'value', '1');
+          var leaveRequest = LeaveRequestInstance.init(mockData.findBy('status_id', status));
+
+          role = 'admin';
+          initTestController({ leaveRequest: leaveRequest });
+        });
+
+        describe('on initialization', function () {
+          it('allows to change absence type', function () {
+            expect(controller.canChangeAbsenceType()).toBeTruthy();
           });
         });
       });

@@ -3,7 +3,7 @@
 define([
   'common/lodash',
   'leave-absences/shared/models/work-pattern.model',
-  'mocks/apis/work-pattern-api-mock'
+  'leave-absences/mocks/apis/work-pattern-api-mock'
 ], function (_) {
   'use strict';
 
@@ -51,9 +51,9 @@ define([
         });
       });
 
-      it('sends "default: true" parameters to the API', function () {
+      it('sends "is_default: true" parameter to the API', function () {
         expect(WorkPatternAPI.get.calls.mostRecent().args[0]).toEqual({
-          default: true
+          is_default: true
         });
       });
 

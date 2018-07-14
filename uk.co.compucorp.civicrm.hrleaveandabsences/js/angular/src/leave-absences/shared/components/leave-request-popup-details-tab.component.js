@@ -12,7 +12,6 @@ define([
       absencePeriods: '<',
       absenceTypes: '<',
       balance: '=',
-      checkSubmitConditions: '=',
       request: '<',
       isLeaveStatus: '<',
       leaveType: '<',
@@ -40,15 +39,17 @@ define([
     var originalOpeningBalance = null;
     var listeners = [];
     var vm = this;
+    var workDays = {};
 
     vm.canManage = false;
     vm.calendar = {};
     vm.errors = [];
+    vm.isRequired = true;
     vm.requestDayTypes = [];
     vm.statusNames = sharedSettings.statusNames;
     vm.loading = {
       tab: false,
-      showBalanceChange: false,
+      balanceChange: false,
       fromDayTypes: false,
       toDayTypes: false
     };
@@ -93,100 +94,259 @@ define([
       },
       times: {
         from: {
-          time: '',
           amount: 0,
-          maxAmount: 0,
-          disabled: true,
+          amountExpanded: false,
           loading: false,
-          skipValueSetting: false
+          max: '00:00',
+          maxAmount: 0,
+          min: '00:00',
+          time: ''
         },
         to: {
-          time: '',
           amount: 0,
-          maxAmount: 0,
-          disabled: true,
+          amountExpanded: false,
           loading: false,
-          skipValueSetting: false
+          max: '00:00',
+          maxAmount: 0,
+          min: '00:00',
+          time: ''
         }
-      }
+      },
+      time_interval: 15 // 15 minutes intervals in time and deduction inputs
     };
 
-    vm.calculateBalanceChange = calculateBalanceChange;
-    vm.changeInNoOfDays = changeInNoOfDays;
+    vm.convertDateFormatFromServer = convertDateFormatFromServer;
+    vm.convertDateToServerFormat = convertDateToServerFormat;
+    vm.dateChangeHandler = dateChangeHandler;
+    vm.dateTypeChangeHandler = dateTypeChangeHandler;
+    vm.daysSelectionModeChangeHandler = daysSelectionModeChangeHandler;
     vm.isLeaveType = isLeaveType;
     vm.isNotWorkingDay = isNotWorkingDay;
-    vm.loadAbsencePeriodDatesTypes = loadAbsencePeriodDatesTypes;
-    vm.updateAbsencePeriodDatesTypes = updateAbsencePeriodDatesTypes;
-    vm.updateBalance = updateBalance;
-    vm._canCalculateChange = _canCalculateChange;
-    vm._calculateOpeningAndClosingBalance = _calculateOpeningAndClosingBalance;
-    vm._checkAndSetAbsencePeriod = _checkAndSetAbsencePeriod;
-    vm._convertDateFormatFromServer = _convertDateFormatFromServer;
-    vm._convertDateToServerFormat = _convertDateToServerFormat;
-    vm._loadCalendar = _loadCalendar;
-    vm._reset = _reset;
-    vm._setDates = _setDates;
-    vm._setDateAndTypes = _setDateAndTypes;
-    vm._setMinMaxDate = _setMinMaxDate;
-    vm._toggleBalance = _toggleBalance;
+    vm.performBalanceChangeCalculation = performBalanceChangeCalculation;
     vm.$onDestroy = unsubscribeFromEvents;
 
     (function init () {
-      $controller(_.capitalize(getLeaveType(vm.leaveType, vm.request)) + 'RequestCtrl', { parentCtrl: vm });
+      $controller(
+        'RequestModalDetails' + _.capitalize(getLeaveType(vm.leaveType, vm.request)) + 'Controller',
+        { detailsController: vm }
+      );
 
       vm.canManage = vm.isRole('manager') || vm.isRole('admin');
       vm.loading.tab = true;
+
+      $scope.$emit('LeaveRequestPopup::addTab', vm);
       initListeners();
 
       vm.initChildController()
-      .then(function () {
-        return $q.all([
-          vm._loadCalendar(),
-          loadDayTypes()
-        ]);
-      })
-      .then(initDates)
-      .then(initTimes)
-      .then(initOriginalOpeningBalance)
-      .then(function () {
-        return $q.all([
-          setDaySelectionMode(),
-          initBalanceChange()
-        ]);
-      })
-      .then(initTimeAndDateInputsWatchers)
-      .catch(handleError)
-      .finally(function () {
-        vm.loading.tab = false;
-      });
+        .then(function () {
+          return $q.all([
+            loadCalendar(),
+            loadDayTypes()
+          ]);
+        })
+        .then(!vm.isMode('create') && initDates)
+        .then(setDaysSelectionMode)
+        .then(function () {
+          if (!vm.isMode('create') && isCalculationUnit('hours')) {
+            return initTimes();
+          }
+        })
+        .then(!vm.isMode('create') && setDatepickerBoundariesForToDate)
+        .then(initOriginalOpeningBalance)
+        .then(setOpeningBalance)
+        .then(initBalanceChange)
+        .then(function () {
+          if (!vm.isMode('view') && !isLeaveType('toil')) {
+            initTimeAndDateInputsWatchers();
+          }
+        })
+        .catch(handleError)
+        .finally(function () {
+          vm.loading.tab = false;
+        });
     }());
 
     /**
-     * Calculate change in balance, it updates local balance variables.
-     *
-     * @return {Promise} empty promise if all required params are not set
-     *   otherwise promise from server
+     * Calculates closing balance which is opening balance minus change amount.
+     * We use "+" operation since the change amount is negative.
      */
-    function calculateBalanceChange () {
-      vm._setDateAndTypes();
-      vm._toggleBalance();
+    function calculateClosingBalance () {
+      vm.balance.closing = vm.balance.opening + vm.balance.change.amount;
+    }
 
-      if (!vm._canCalculateChange()) { return $q.resolve(); }
+    /**
+     * Converts given date to javascript date as expected by uib-datepicker
+     *
+     * @param {String} date from server
+     * @return {Date}
+     */
+    function convertDateFormatFromServer (date) {
+      return moment(date, sharedSettings.serverDateFormat).toDate();
+    }
 
-      vm.loading.showBalanceChange = true;
+    /**
+     * Converts given date to server format
+     *
+     * @param {Date} date
+     * @return {String} date converted to server format
+     */
+    function convertDateToServerFormat (date) {
+      return moment(date).format(sharedSettings.serverDateFormat);
+    }
 
-      return vm.request.calculateBalanceChange(vm.selectedAbsenceType.calculation_unit_name)
-        .then(setBalanceChange)
+    /**
+     * Sets dates (with time in case of "hours" Absence Type) from UI to request
+     *
+     * @param  {String} dateType from|to
+     * @return {Promise}
+     */
+    function dateChangeHandler (dateType) {
+      var absencePeriodChanged;
+
+      return $q.resolve()
+        .then(function () {
+          resetUIDayTypesTimeAndDeductions(dateType);
+
+          if (dateType === 'from') {
+            resetToDateIfGreaterThanFromDate();
+          }
+
+          if (isCalculationUnit('hours')) {
+            disableAndShowLoadingTimeInput(dateType);
+
+            if (dateType === 'from' && !vm.uiOptions.multipleDays) {
+              disableAndShowLoadingTimeInput('to');
+            }
+          }
+
+          vm.loading[dateType + 'DayTypes'] = true;
+        })
+        .then(vm.onDateChangeExtended)
+        .then(function () {
+          return getAbsencePeriod(dateType);
+        })
+        .then(function (datePeriod) {
+          absencePeriodChanged = datePeriod.id !== vm.period.id;
+
+          if (absencePeriodChanged) {
+            vm.period = datePeriod;
+          }
+
+          // @TODO this exception should belong to getAbsencePeriod()
+          if (!vm.period.id) {
+            return $q.reject('Please change date as it is not in any absence period');
+          }
+        })
+        .then(setDatepickerBoundariesForToDate)
+        .then(function () {
+          if (absencePeriodChanged) {
+            return loadCalendar();
+          }
+        })
+        .then(function () {
+          return loadDayTypesForDate(vm.uiOptions[dateType + 'Date'], dateType);
+        })
+        .then(function () {
+          if (isCalculationUnit('hours')) {
+            return loadTimeRangesFromWorkPattern(dateType)
+              .then(function () {
+                setDeductionMaximumBoundary(dateType, true);
+              });
+          }
+        })
+        .then(function () {
+          setRequestDateTimesAndDateTypes();
+
+          if (absencePeriodChanged) {
+            $rootScope.$broadcast('LeaveRequestPopup::absencePeriodChanged');
+          } else {
+            return performBalanceChangeCalculation();
+          }
+        })
         .catch(handleError);
     }
 
     /**
-     * Change handler when changing no. of days like Multiple Days or Single Day.
-     * It will reset dates, day types, change balance.
+     * Sets day types from UI to request and performs balance calculation
+     *
+     * @return {Promise}
      */
-    function changeInNoOfDays () {
-      vm._reset();
-      vm._calculateOpeningAndClosingBalance();
+    function dateTypeChangeHandler () {
+      setRequestDateTimesAndDateTypes();
+
+      return performBalanceChangeCalculation();
+    }
+
+    /**
+     * Handles the change of days selection mode (single day, multiple days).
+     * Always flushes "to" date.
+     * Only performs calculation if switched to Single day mode.
+     *
+     * @return {Promise}
+     */
+    function daysSelectionModeChangeHandler () {
+      vm.uiOptions.toDate = null;
+
+      resetUIDayTypesTimeAndDeductions('to');
+
+      return $q.resolve()
+        .then(function () {
+          if (isCalculationUnit('hours') && vm.uiOptions.fromDate) {
+            disableAndShowLoadingTimeInput('from');
+            (!vm.uiOptions.multipleDays) && disableAndShowLoadingTimeInput('to');
+
+            return loadTimeRangesFromWorkPattern('from')
+              .then(function () {
+                setDeductionMaximumBoundary('from', true);
+              })
+              .then(setRequestDateTimesAndDateTypes);
+          }
+        })
+        .then(vm.setDaysSelectionModeExtended)
+        .then(!vm.uiOptions.multipleDays && performBalanceChangeCalculation);
+    }
+
+    /**
+     * Disables a time input of the specified type
+     * and shows that it is currently loading
+     *
+     * @param {String} type from|to
+     */
+    function disableAndShowLoadingTimeInput (type) {
+      var timeObject = vm.uiOptions.times[type];
+
+      timeObject.loading = true;
+      timeObject.disabled = true;
+    }
+
+    /**
+     * Enables a time input of the specified type
+     * and sets provided data such as minumum and maximum time values and time
+     *
+     * @param {String} type from|to
+     */
+    function enableAndSetDataToTimeInput (type, data) {
+      var timeObject = vm.uiOptions.times[type];
+      var timeMin = _.clone(data.time_from);
+      var timeMax = _.clone(data.time_to);
+
+      if (!vm.uiOptions.multipleDays) {
+        if (type === 'from' && timeMax && timeMin) {
+          timeMax = getMomentDateWithGivenTime(timeMax)
+            .subtract(vm.uiOptions.time_interval, 'minutes')
+            .format('HH:mm');
+        }
+        if (type === 'to' && timeMin && timeMax) {
+          timeMin = getMomentDateWithGivenTime(timeMin)
+            .add(vm.uiOptions.time_interval, 'minutes')
+            .format('HH:mm');
+        }
+      }
+
+      timeObject.min = timeMin || '00:00';
+      timeObject.max = timeMax || '00:00';
+      timeObject.time = type === 'to' ? timeObject.max : timeObject.min;
+      timeObject.disabled = false;
     }
 
     /**
@@ -212,38 +372,49 @@ define([
      * @return {Promise} of array with day types
      */
     function filterLeaveRequestDayTypes (date, dayType) {
-      var listToReturn;
-
       if (!date) {
         return $q.reject([]);
       }
 
-      // Make a copy of the list
-      listToReturn = vm.requestDayTypes.slice(0);
-      date = vm._convertDateToServerFormat(date);
+      date = convertDateToServerFormat(date);
 
       return PublicHoliday.isPublicHoliday(date)
         .then(function (result) {
           if (result) {
-            return listToReturn.filter(function (publicHoliday) {
+            return vm.requestDayTypes.filter(function (publicHoliday) {
               return publicHoliday.name === 'public_holiday';
             });
           }
 
-          return getDayTypesFromDate(date, listToReturn)
+          return getDayTypesFromDate(date, vm.requestDayTypes)
             .then(function (inCalendarList) {
               return inCalendarList.length
                 ? inCalendarList
-                : listToReturn.filter(function (dayType) {
+                : vm.requestDayTypes.filter(function (dayType) {
                   return _.includes(['all_day', 'half_day_am', 'half_day_pm'], dayType.name);
                 });
             });
         })
-        .then(function (listToReturn) {
-          setDayType(dayType, listToReturn);
+        .then(function (dayTypes) {
+          setDayTypes(dayType, dayTypes);
 
-          return listToReturn;
+          return dayTypes;
         });
+    }
+
+    /**
+     * Gets absence period for the given date
+     *
+     * @param  {String} dateType from|to
+     * @return {Object} Absence period instance or empty object if not found
+     */
+    function getAbsencePeriod (dateType) {
+      var formattedDate = moment(vm.uiOptions[dateType + 'Date'])
+        .format(vm.uiOptions.userDateFormat.toUpperCase());
+
+      return _.find(vm.absencePeriods, function (period) {
+        return period.isInPeriod(formattedDate);
+      }) || {};
     }
 
     /**
@@ -261,8 +432,7 @@ define([
         vm.calendar.isWeekend(date)
       ]).then(function (results) {
         return results[0] ? 'non_working_day' : (results[1] ? 'weekend' : null);
-      })
-      .then(function (nameFilter) {
+      }).then(function (nameFilter) {
         return !nameFilter ? [] : listOfDayTypes.filter(function (day) {
           return day.name === nameFilter;
         });
@@ -279,14 +449,17 @@ define([
     }
 
     /**
-     * Gets currently selected absence type from leave request type_id
+     * Returns a date with a given time
      *
-     * @return {Object} absence type object
+     * @param  {String} time in HH:mm or hh:mm formats
+     * @return {Moment}
      */
-    function getSelectedAbsenceType () {
-      return _.find(vm.absenceTypes, function (absenceType) {
-        return absenceType.id === vm.request.type_id;
-      });
+    function getMomentDateWithGivenTime (time) {
+      return moment()
+        .set({
+          'hours': time.split(':')[0],
+          'minutes': time.split(':')[1]
+        });
     }
 
     /**
@@ -296,14 +469,26 @@ define([
      * @return {Promise}
      */
     function getOriginalBalanceChange () {
-      vm._setDateAndTypes();
-      vm._toggleBalance();
+      toggleBalance();
 
-      vm.loading.showBalanceChange = true;
+      vm.loading.balanceChange = true;
 
       return vm.request.getBalanceChangeBreakdown()
         .then(setBalanceChange)
         .catch(handleError);
+    }
+
+    /**
+     * Calculates time difference in hours
+     *
+     * @param  {String} timeFrom in HH:mm format
+     * @param  {String} timeTo in HH:mm format
+     * @return {String} amount of hours, eg. '7.5'
+     */
+    function getTimeDifferenceInHours (timeFrom, timeTo) {
+      return (getMomentDateWithGivenTime(timeTo)
+        .diff(getMomentDateWithGivenTime(timeFrom), 'minutes') / 60)
+        .toString();
     }
 
     /**
@@ -314,7 +499,7 @@ define([
     function handleError (errors) {
       $rootScope.$broadcast('LeaveRequestPopup::handleError', _.isArray(errors) ? errors : [errors]);
       vm.loading.fromDayTypes = false;
-      vm.loading.showBalanceChange = false;
+      vm.loading.balanceChange = false;
       vm.loading.tab = false;
       vm.loading.toDayTypes = false;
     }
@@ -325,27 +510,7 @@ define([
      * @return {Promise}
      */
     function initBalanceChange () {
-      return (vm.isMode('edit') ? getOriginalBalanceChange() : calculateBalanceChange());
-    }
-
-    /**
-     * Checks for the calculation unit for the selected absence type
-     *
-     * @param  {String} unit (days|hours)
-     * @return {Boolean}
-     */
-    function isCalculationUnit (unit) {
-      return vm.selectedAbsenceType.calculation_unit_name === unit;
-    }
-
-    /**
-     * Checks if popup is opened in given leave type like `leave` or `sickness` or 'toil'
-     *
-     * @param {String} leaveTypeParam to check the leave type of current request
-     * @return {Boolean}
-     */
-    function isLeaveType (leaveTypeParam) {
-      return vm.request.request_type === leaveTypeParam;
+      return (!vm.isMode('create') ? getOriginalBalanceChange() : performBalanceChangeCalculation());
     }
 
     /**
@@ -354,24 +519,19 @@ define([
      * @return {Promise}
      */
     function initDates () {
-      var attributes;
+      var attributes = vm.request.attributes();
 
-      if (!vm.isMode('create')) {
-        attributes = vm.request.attributes();
-        vm.uiOptions.fromDate = vm._convertDateFormatFromServer(vm.request.from_date);
+      vm.uiOptions.fromDate = convertDateFormatFromServer(vm.request.from_date);
 
-        return vm.loadAbsencePeriodDatesTypes(vm.uiOptions.fromDate, 'from')
-          .then(function () {
-            // to_date and type has been reset in above call so reinitialize from clone
-            vm.request.to_date = attributes.to_date;
-            vm.request.to_date_type = attributes.to_date_type;
-            vm.uiOptions.toDate = vm._convertDateFormatFromServer(vm.request.to_date);
+      return loadDayTypesForDate(vm.uiOptions.fromDate, 'from')
+        .then(function () {
+          // to_date and type has been reset in above call so reinitialize from clone
+          vm.request.to_date = attributes.to_date;
+          vm.request.to_date_type = attributes.to_date_type;
+          vm.uiOptions.toDate = convertDateFormatFromServer(vm.request.to_date);
 
-            return vm.loadAbsencePeriodDatesTypes(vm.uiOptions.toDate, 'to');
-          });
-      } else {
-        return $q.resolve();
-      }
+          return loadDayTypesForDate(vm.uiOptions.toDate, 'to');
+        });
     }
 
     /**
@@ -379,51 +539,16 @@ define([
      */
     function initListeners () {
       listeners.push(
-        $rootScope.$on('LeaveRequestPopup::updateBalance', function () {
-          vm.updateBalance();
-          setDaySelectionMode();
-        })
+        $rootScope.$on('LeaveRequestPopup::absenceTypeChanged', function () {
+          updateAbsenceType();
+        }),
+        // @TODO handle when absence period exists, but there are no entitlements for this period
+        // @TODO absence types with balances should be watched via $onChange
+        $rootScope.$on('LeaveRequestPopup::absencePeriodBalancesUpdated', function (event, absenceTypesWithBalances) {
+          updateBalances(absenceTypesWithBalances);
+        }),
+        $rootScope.$on('LeaveRequestPopup::recalculateBalanceChange', performBalanceChangeCalculation)
       );
-    }
-
-    /**
-     * Initialises and sets the "from" and "to" times
-     */
-    function initTimes () {
-      var times = vm.uiOptions.times;
-      var request = vm.request;
-
-      if (!vm.isMode('create') && isCalculationUnit('hours')) {
-        _.each(['from', 'to'], function (type) {
-          times[type].skipValueSetting = true;
-          times[type].time = extractTimeFromServerDate(request[type + '_date']);
-          times[type].amount = request[type + '_date_amount'];
-          times[type].maxAmount = times[type].amount;
-        });
-      }
-    }
-
-    /**
-     * Initialises watchers for time and date inputs
-     */
-    function initTimeAndDateInputsWatchers () {
-      if (vm.isMode('view') || isLeaveType('toil')) { return; }
-
-      _.each(['from', 'to'], function (type) {
-        $scope.$watch('detailsTab.uiOptions.times.' + type + '.amount', function (amount, oldAmount) {
-          if (!isCalculationUnit('days') && +amount !== +oldAmount) {
-            return vm.calculateBalanceChange();
-          }
-        });
-        $scope.$watch('detailsTab.uiOptions.times.' + type + '.time', function (time, oldTime) {
-          if (!isCalculationUnit('days') && +time !== +oldTime) {
-            vm._setDateAndTypes();
-          }
-        });
-        $scope.$watch('detailsTab.uiOptions.' + type + 'Date', function (date) {
-          return loadAndSetTimeRangesFromWorkPattern(date, type);
-        });
-      });
     }
 
     /**
@@ -447,6 +572,79 @@ define([
     }
 
     /**
+     * Initialises and sets the "from" and "to" times
+     *
+     * @return {Promise}
+     */
+    function initTimes () {
+      var dateTypes = vm.uiOptions.multipleDays ? ['from', 'to'] : ['from'];
+      var times = vm.uiOptions.times;
+
+      return $q.all(dateTypes.map(loadTimeRangesFromWorkPattern))
+        .then(function () {
+          ['from', 'to'].forEach(function (dateType) {
+            times[dateType].time = extractTimeFromServerDate(vm.request[dateType + '_date']);
+
+            setDeductionMaximumBoundary(dateType);
+
+            times[dateType].amount =
+              Math.min(vm.request[dateType + '_date_amount'], times[dateType].maxAmount).toString();
+          });
+
+          if (!vm.uiOptions.multipleDays) {
+            updateEndTimeInputMinTime(vm.uiOptions.times.from.time);
+          }
+        }).then(setRequestHoursDeductions);
+    }
+
+    /**
+     * Initialises watchers for time and date inputs
+     */
+    function initTimeAndDateInputsWatchers () {
+      ['from', 'to'].forEach(function (dateType) {
+        $scope.$watch('detailsTab.uiOptions.times.' + dateType + '.amount', function (amount, oldAmount) {
+          if (!isCalculationUnit('days') && +amount !== +oldAmount) {
+            setRequestHoursDeductions();
+            // @NOTE `vm.` is needed for testing purposes
+            vm.performBalanceChangeCalculation();
+          }
+        });
+        $scope.$watch('detailsTab.uiOptions.times.' + dateType + '.time', function (time, oldTime) {
+          if (!isCalculationUnit('days') && time !== oldTime) {
+            setRequestDateTimesAndDateTypes();
+
+            if (!time) {
+              return;
+            }
+
+            (!vm.uiOptions.multipleDays && dateType === 'from') && updateEndTimeInputMinTime(time);
+            setDeductionMaximumBoundary(dateType, true);
+          }
+        });
+      });
+    }
+
+    /**
+     * Checks for the calculation unit for the selected absence type
+     *
+     * @param  {String} unit (days|hours)
+     * @return {Boolean}
+     */
+    function isCalculationUnit (unit) {
+      return vm.selectedAbsenceType.calculation_unit_name === unit;
+    }
+
+    /**
+     * Checks if popup is opened in given leave type like `leave` or `sickness` or 'toil'
+     *
+     * @param {String} leaveTypeParam to check the leave type of current request
+     * @return {Boolean}
+     */
+    function isLeaveType (leaveTypeParam) {
+      return vm.request.request_type === leaveTypeParam;
+    }
+
+    /**
      * Checks if the given day type is not a working day.
      * Do not confuse with "non working day".
      *
@@ -465,42 +663,10 @@ define([
      * @param {String} dayType - set to from if from date is selected else to
      * @return {Promise}
      */
-    function loadAbsencePeriodDatesTypes (date, dayType) {
-      var oldPeriodId = vm.period.id;
-      dayType = dayType || 'from';
-      vm.loading[dayType + 'DayTypes'] = true;
-
-      return vm._checkAndSetAbsencePeriod(date)
+    function loadDayTypesForDate (date, dateType) {
+      return filterLeaveRequestDayTypes(date, dateType)
         .then(function () {
-          var isInCurrentPeriod = oldPeriodId === vm.period.id;
-
-          if (!isInCurrentPeriod) {
-            // partial reset is required when user has selected a to date and
-            // then changes absence period from from date
-            // no reset required for single days and to date changes
-            if (vm.uiOptions.multipleDays && dayType === 'from') {
-              vm.uiOptions.showBalance = false;
-              vm.uiOptions.toDate = null;
-              vm.request.to_date = null;
-              vm.request.to_date_type = null;
-            }
-
-            return $q.all([
-              vm._loadCalendar()
-            ]);
-          }
-        })
-        .then(function () {
-          vm._setMinMaxDate();
-
-          return filterLeaveRequestDayTypes(date, dayType);
-        })
-        .finally(function () {
-          /**
-           * after the request is completed fromDayTypes or toDayTypes are
-           * set to false and the corresponding field is shown on the ui.
-           */
-          vm.loading[dayType + 'DayTypes'] = false;
+          vm.loading[dateType + 'DayTypes'] = false;
         });
     }
 
@@ -517,41 +683,49 @@ define([
     }
 
     /**
-     * Loads and sets time ranges from work pattern for "from" or "to" timepickers
+     * Loads time ranges from work pattern,
+     * sets time ranges for timepickers and maximum value for deduction.
      *
-     * @param  {Date} date in standard JavaScript format
-     * @param  {String} type (days|hours)
+     * @param  {String} dateType from|to
      * @return {Promise}
      */
-    function loadAndSetTimeRangesFromWorkPattern (date, type) {
-      var timeObject = vm.uiOptions.times[type];
+    function loadTimeRangesFromWorkPattern (dateType) {
+      var date = vm.uiOptions[dateType + 'Date'];
+      var timeObject = vm.uiOptions.times[dateType];
+      var isSingleDayRequest = !vm.uiOptions.multipleDays;
 
-      if (!date) { return $q.resolve(); }
-
-      timeObject.loading = true;
-      timeObject.disabled = true;
-
-      if (!timeObject.skipValueSetting) {
-        timeObject.time = '';
-        timeObject.amount = '0';
+      if (!date) {
+        return $q.resolve();
       }
 
-      return vm.request.getWorkDayForDate(date)
-        .then(function (response) {
-          timeObject.min = response.time_from || '00:00';
-          timeObject.max = response.time_to || '00:00';
-          timeObject.maxAmount = response.number_of_hours.toString() || '0';
-          timeObject.disabled = false;
+      return vm.request.getWorkDayForDate(convertDateToServerFormat(date))
+        .then(function (workDay) {
+          workDays[dateType] = workDay;
 
-          if (!timeObject.skipValueSetting) {
-            timeObject.time = (type === 'to' ? timeObject.max : timeObject.min);
-            timeObject.amount = timeObject.maxAmount;
-          }
+          enableAndSetDataToTimeInput(dateType, workDay);
+          (isSingleDayRequest && dateType === 'from') && enableAndSetDataToTimeInput('to', workDay);
         })
-        .catch(handleError)
+        .catch(function (err) {
+          workDays[dateType] = {};
+
+          return handleError(err);
+        })
         .finally(function () {
           timeObject.loading = false;
-          timeObject.skipValueSetting = false;
+
+          isSingleDayRequest && (vm.uiOptions.times['to'].loading = false);
+        });
+    }
+
+    /**
+     * Initializes user's calendar (work patterns)
+     *
+     * @return {Promise}
+     */
+    function loadCalendar () {
+      return Calendar.get(vm.request.contact_id, vm.period.start_date, vm.period.end_date)
+        .then(function (contactCalendar) {
+          vm.calendar = contactCalendar;
         });
     }
 
@@ -566,6 +740,29 @@ define([
     }
 
     /**
+     * Performs a set of manipulations to prepare all data for calculation and
+     * then triggers the calculation itself if it can be calculated
+     *
+     * @return {Promise}
+     */
+    function performBalanceChangeCalculation () {
+      toggleBalance();
+
+      if (!vm.canCalculateChange()) {
+        return $q.resolve();
+      }
+
+      vm.loading.balanceChange = true;
+
+      return vm.calculateBalanceChange()
+        .then(setBalanceChange)
+        .catch(handleError)
+        .finally(function () {
+          vm.loading.balanceChange = false;
+        });
+    }
+
+    /**
      * Helper function to reset pagination for balance breakdow
      */
     function rePaginate () {
@@ -577,12 +774,47 @@ define([
     /**
      * Checks if the given request has same "from" and "to" dates
      *
-     * @param  {RequestInstance} request
      * @return {Boolean}
      */
-    function requestHasSameDates (request) {
-      return _convertDateToServerFormat(request.from_date) ===
-        _convertDateToServerFormat(request.to_date);
+    function requestHasSameDates () {
+      return convertDateToServerFormat(vm.request.from_date) ===
+        convertDateToServerFormat(vm.request.to_date);
+    }
+
+    /**
+     * Checks To Date and flushes it if it is the same or before
+     * the "from date" in case of the multiple day request.
+     */
+    function resetToDateIfGreaterThanFromDate () {
+      if (
+        vm.uiOptions.toDate && vm.uiOptions.fromDate && vm.uiOptions.multipleDays &&
+        moment(vm.uiOptions.toDate).isSameOrBefore(vm.uiOptions.fromDate)
+      ) {
+        vm.uiOptions.toDate = null;
+
+        resetUIDayTypesTimeAndDeductions('to');
+      }
+    }
+
+    /**
+     * Reset day types, times and deductions.
+     *
+     * @param {String} dateType from|to
+     */
+    function resetUIDayTypesTimeAndDeductions (dateType) {
+      var time = vm.uiOptions.times[dateType];
+
+      vm['request' + _.startCase(dateType) + 'DayTypes'] = [];
+      time.time = '';
+      time.min = '00:00';
+      time.max = '00:00';
+      time.amount = '0';
+      time.maxAmount = '0';
+      time.loading = false;
+
+      setRequestDateTimesAndDateTypes();
+      setRequestHoursDeductions();
+      toggleBalance();
     }
 
     /**
@@ -591,44 +823,148 @@ define([
      * @param {Object} balanceChange
      */
     function setBalanceChange (balanceChange) {
-      if (balanceChange) {
-        vm.balance.change = balanceChange;
+      vm.balance.change = balanceChange;
+      vm.request.balance_change = balanceChange.amount;
 
-        vm._calculateOpeningAndClosingBalance();
-        rePaginate();
+      calculateClosingBalance();
+      rePaginate();
+
+      vm.loading.balanceChange = false;
+    }
+
+    /**
+     * Sets the min and max for to date from absence period. It also sets the
+     * init/starting date which user can select from. For multiple days request
+     * user can select to date which is one more than the the start date.
+     */
+    function setDatepickerBoundariesForToDate () {
+      var dayAfterFromDate, initDate, minDate;
+
+      if (vm.uiOptions.fromDate) {
+        dayAfterFromDate = moment(vm.uiOptions.fromDate).add(1, 'day').toDate();
+        minDate = dayAfterFromDate;
+        initDate = dayAfterFromDate;
+      } else {
+        minDate = convertDateFormatFromServer(vm.period.start_date);
+        initDate = vm.uiOptions.date.to.options.minDate;
       }
 
-      vm.loading.showBalanceChange = false;
+      vm.uiOptions.date.to.options.initDate = initDate;
+      vm.uiOptions.date.to.options.minDate = minDate;
+      vm.uiOptions.date.to.options.maxDate = convertDateFormatFromServer(vm.period.end_date);
     }
 
     /**
      * Sets day selection mode: multiple days or a single day
+     *
+     * @return {Promise}
      */
-    function setDaySelectionMode () {
-      if ((!vm.isMode('create') && requestHasSameDates(vm.request)) ||
-        (vm.isMode('create') && (vm.isLeaveType('sickness') || isCalculationUnit('hours')))) {
+    function setDaysSelectionMode () {
+      if ((!vm.isMode('create') && requestHasSameDates()) ||
+        (vm.isMode('create') && (isLeaveType('sickness') || isCalculationUnit('hours')))) {
         vm.uiOptions.multipleDays = false;
       } else {
         vm.uiOptions.multipleDays = true;
       }
+
+      return $q.resolve().then(vm.setDaysSelectionModeExtended);
     }
 
     /**
      * Sets the collection for given day types to sent list of day types,
      * also initializes the day types
      *
-     * @param {String} dayType like `from` or `to`
+     * @param {String} dateType from|to
      * @param {Array} listOfDayTypes collection of available day types
      */
-    function setDayType (dayType, listOfDayTypes) {
+    function setDayTypes (dateType, listOfDayTypes) {
       // will create either of leaveRequestFromDayTypes or leaveRequestToDayTypes key
-      var keyForDayTypeCollection = 'request' + _.startCase(dayType) + 'DayTypes';
+      var keyForDayTypeCollection = 'request' + _.startCase(dateType) + 'DayTypes';
 
       vm[keyForDayTypeCollection] = listOfDayTypes;
 
       if (vm.isMode('create')) {
-        vm.request[dayType + '_date_type'] = vm[keyForDayTypeCollection][0].value;
+        vm.request[dateType + '_date_type'] = vm[keyForDayTypeCollection][0].value;
       }
+    }
+
+    /**
+     * Sets deduction maximum and default amounts for a given day type
+     *
+     * @param {String} timeType from|to
+     * @param {Boolean} setDefaultValue if TRUE, then set the current value to maximum
+     */
+    function setDeductionMaximumBoundary (timeType, setDefaultValue) {
+      var uiOptions = vm.uiOptions;
+      var dateType = uiOptions.multipleDays ? timeType : 'from';
+      var timeObject = uiOptions.times[dateType];
+      var timeFrom = uiOptions.multipleDays && dateType === 'to' ? timeObject.min : uiOptions.times.from.time;
+      var timeTo = uiOptions.multipleDays && dateType === 'from' ? timeObject.max : uiOptions.times.to.time;
+      var deduction = workDays[dateType].number_of_hours ? getTimeDifferenceInHours(timeFrom, timeTo) : '0';
+
+      timeObject.maxAmount = deduction;
+      (setDefaultValue) && (timeObject.amount = timeObject.maxAmount);
+    }
+
+    /**
+     * Updates the opening balance depending on the mode
+     * In case of "edit" or "view" mode, sets original balance
+     * In case of "create", sets the balance from the remainder
+     */
+    function setOpeningBalance () {
+      if (originalOpeningBalance &&
+        originalOpeningBalance.absenceTypeId === vm.selectedAbsenceType.id) {
+        vm.balance.opening = originalOpeningBalance.value || 0;
+      } else {
+        vm.balance.opening = vm.selectedAbsenceType.remainder;
+      }
+    }
+
+    /**
+     * Sets currently selected absence type from leave request type_id
+     */
+    function setSelectedAbsenceType () {
+      vm.selectedAbsenceType = _.find(vm.absenceTypes, function (absenceType) {
+        return absenceType.id === vm.request.type_id;
+      });
+    }
+
+    /**
+     * Sets dates, times and date types to request from UI in the DateTime format
+     */
+    function setRequestDateTimesAndDateTypes () {
+      var options = vm.uiOptions;
+      var times = options.times;
+
+      vm.request.from_date = options.fromDate ? convertDateToServerFormat(options.fromDate) : null;
+      vm.request.to_date = options.toDate ? convertDateToServerFormat(options.toDate) : null;
+
+      if (!options.multipleDays && options.fromDate) {
+        vm.request.to_date = vm.request.from_date;
+        vm.request.to_date_type = vm.request.from_date_type;
+      }
+
+      if (isCalculationUnit('hours') && !isLeaveType('toil')) {
+        vm.request.from_date = vm.request.from_date && times.from.time ? vm.request.from_date + ' ' + times.from.time : null;
+        vm.request.to_date = vm.request.to_date && times.to.time ? vm.request.to_date + ' ' + times.to.time : null;
+      }
+    }
+
+    /**
+     * Sets deductions in hours from UI to vm.request
+     */
+    function setRequestHoursDeductions () {
+      var times = vm.uiOptions.times;
+
+      vm.request.from_date_amount = !isNaN(+times.from.amount) ? times.from.amount : null;
+      vm.request.to_date_amount = !isNaN(+times.to.amount) ? times.to.amount : null;
+    }
+
+    /**
+     * Shows or hides the balance breakdown depending on various conditions
+     */
+    function toggleBalance () {
+      vm.uiOptions.showBalance = vm.canCalculateChange();
     }
 
     /**
@@ -641,219 +977,81 @@ define([
     }
 
     /**
-     * This should be called whenever a date has been changed
-     * First it syncs `from` and `to` date, if it's in 'single day' mode
-     * Then, if all the dates are there, it gets the balance change
+     * Updates absence types, sets opening balance for the selected absence type,
+     * and, if calculation unit has changed, changes the days selection modes,
+     * loads time ranges if the absence type calculation unit is "hours",
+     * updates the dates and times in the request and finally, performs
+     * balance change calculation
      *
-     * @param {Date} date - the selected date
-     * @param {String} dayType - set to from if from date is selected else to
      * @return {Promise}
      */
-    function updateAbsencePeriodDatesTypes (date, dayType) {
-      return vm.loadAbsencePeriodDatesTypes(date, dayType)
+    function updateAbsenceType () {
+      var absenceTypeUnitChanged;
+      var previousAbsenceTypeUnit = vm.selectedAbsenceType.calculation_unit_name;
+
+      setSelectedAbsenceType();
+
+      absenceTypeUnitChanged = previousAbsenceTypeUnit !== vm.selectedAbsenceType.calculation_unit_name;
+
+      setOpeningBalance();
+
+      return $q.resolve()
+        .then(absenceTypeUnitChanged && setDaysSelectionMode)
         .then(function () {
-          return vm.updateBalance();
+          if (absenceTypeUnitChanged && isCalculationUnit('hours')) {
+            return loadTimeRangesFromWorkPattern('from')
+              .then(function () {
+                setDeductionMaximumBoundary('from', true);
+              });
+          }
         })
-        .catch(function (errors) {
-          handleError(errors);
-          vm._setDateAndTypes();
-          vm._toggleBalance();
-        });
+        .then(absenceTypeUnitChanged && setRequestDateTimesAndDateTypes)
+        .then(performBalanceChangeCalculation);
     }
 
     /**
-     * Whenever the absence type changes, update the balance opening.
-     * Also the balance change needs to be recalculated, if the `from` and `to`
-     * dates have been already selected
-     */
-    function updateBalance () {
-      vm.selectedAbsenceType = getSelectedAbsenceType();
-      // get the `balance` of the newly selected absence type
-      vm.balance.opening = vm.selectedAbsenceType.remainder;
-
-      vm.calculateBalanceChange();
-    }
-
-    /**
-     * If change can be calculated
-     */
-    function _canCalculateChange () {
-      var canCalculate = !!vm.request.from_date && !!vm.request.to_date;
-
-      if (isCalculationUnit('days')) {
-        canCalculate = canCalculate &&
-          !!vm.request.from_date_type && !!vm.request.to_date_type;
-      }
-
-      return canCalculate;
-    }
-
-    /**
-     * Calculates and updates opening and closing balances.
+     * Updates balances as per the absence types with balances passed,
+     * resets "to" date, time and deduction,
+     * sets opening balance and finally performs balance change calculation
      *
-     * For the opening balance, when in edit mode, if the selected absence type
-     * is the same as the request absence type, the opening balance is the
-     * original opening balance value, otherwise it's the leave balance
-     * remainder.
-     *
-     * The closing balance is the opening balance + change amount.
-     */
-    function _calculateOpeningAndClosingBalance () {
-      if (originalOpeningBalance &&
-      originalOpeningBalance.absenceTypeId === vm.selectedAbsenceType.id) {
-        vm.balance.opening = originalOpeningBalance.value || 0;
-      } else {
-        vm.balance.opening = vm.selectedAbsenceType.remainder;
-      }
-      // the change is negative so adding it will actually subtract it
-      vm.balance.closing = vm.balance.opening + vm.balance.change.amount;
-    }
-
-    /**
-     * Finds if date is in any absence period and sets absence period for the given date
-     *
-     * @param {Date/String} date
-     * @return {Promise} with true value if period found else rejected false
-     */
-    function _checkAndSetAbsencePeriod (date) {
-      var formattedDate = moment(date).format(vm.uiOptions.userDateFormat.toUpperCase());
-
-      vm.period = _.find(vm.absencePeriods, function (period) {
-        return period.isInPeriod(formattedDate);
-      });
-
-      if (!vm.period) {
-        vm.period = {};
-        // inform user if absence period is not found
-        vm.loading['fromDayTypes'] = false;
-        return $q.reject('Please change date as it is not in any absence period');
-      }
-
-      return $q.resolve(true);
-    }
-
-    /**
-     * Converts given date to javascript date as expected by uib-datepicker
-     *
-     * @param {String} date from server
-     * @return {Date}
-     */
-    function _convertDateFormatFromServer (date) {
-      return moment(date, sharedSettings.serverDateFormat).toDate();
-    }
-
-    /**
-     * Converts given date to server format
-     *
-     * @param {Date} date
-     * @return {String} date converted to server format
-     */
-    function _convertDateToServerFormat (date) {
-      return moment(date).format(sharedSettings.serverDateFormat);
-    }
-
-    /**
-     * Initializes user's calendar (work patterns)
-     *
+     * @param  {Object} absenceTypesWithBalances
      * @return {Promise}
      */
-    function _loadCalendar () {
-      return Calendar.get(vm.request.contact_id, vm.period.start_date, vm.period.end_date)
-        .then(function (usersCalendar) {
-          vm.calendar = usersCalendar;
-        });
-    }
+    function updateBalances (absenceTypesWithBalances) {
+      vm.absenceTypes = absenceTypesWithBalances;
 
-    /**
-     * Sets dates (and times in case of "hours" absence type) for vm.request from UI
-     */
-    function _setDates () {
-      var options = vm.uiOptions;
-      var request = vm.request;
-      var times;
+      // @TODO watching and setting selected absence type should go to $onChange
+      setSelectedAbsenceType();
 
-      request.from_date = options.fromDate ? vm._convertDateToServerFormat(options.fromDate) : null;
-      request.to_date = options.toDate ? vm._convertDateToServerFormat(options.toDate) : null;
+      if (moment(vm.uiOptions.toDate).isAfter(vm.period.end_date)) {
+        vm.uiOptions.toDate = undefined;
 
-      if (isCalculationUnit('hours') && !isLeaveType('toil')) {
-        times = options.times;
-        request.from_date = request.from_date && times.from.time ? request.from_date + ' ' + times.from.time : null;
-        request.to_date = request.to_date && times.to.time ? request.to_date + ' ' + times.to.time : null;
-        request.from_date_amount = !isNaN(+times.from.amount) ? times.from.amount : null;
-        request.to_date_amount = !isNaN(+times.to.amount) ? times.to.amount : null;
+        resetUIDayTypesTimeAndDeductions('to');
       }
 
-      if (!options.multipleDays && options.fromDate) {
-        options.toDate = options.fromDate;
-        request.to_date = request.from_date;
-      }
+      setOpeningBalance();
+
+      return performBalanceChangeCalculation();
     }
 
     /**
-     * Sets dates and types for vm.request from UI
+     * Updates minimum allowed time for end time input basing on start time
+     * and flushes end time in case it is out of boundaries
+     *
+     * @param {String} time - start time in HH:mm format
      */
-    function _setDateAndTypes () {
-      vm._setDates();
+    function updateEndTimeInputMinTime (time) {
+      var timeToMin = getMomentDateWithGivenTime(time)
+        .add(vm.uiOptions.time_interval, 'minutes');
 
-      if (!vm.uiOptions.multipleDays && vm.uiOptions.fromDate) {
-        vm.request.to_date_type = vm.request.from_date_type;
-      }
-    }
-
-    /**
-     * Sets the min and max for to date from absence period. It also sets the
-     * init/starting date which user can select from. For multiple days request
-     * user can select to date which is one more than the the start date.
-     */
-    function _setMinMaxDate () {
-      if (vm.uiOptions.fromDate) {
-        var nextFromDay = moment(vm.uiOptions.fromDate).add(1, 'd').toDate();
-
-        vm.uiOptions.date.to.options.minDate = nextFromDay;
-        vm.uiOptions.date.to.options.initDate = nextFromDay;
-
-        // also re-set to date if from date is changing and less than to date
-        if (vm.uiOptions.toDate && moment(vm.uiOptions.toDate).isBefore(vm.uiOptions.fromDate)) {
-          vm.uiOptions.toDate = vm.uiOptions.fromDate;
-        }
-      } else {
-        vm.uiOptions.date.to.options.minDate = vm._convertDateFormatFromServer(vm.period.start_date);
-        vm.uiOptions.date.to.options.initDate = vm.uiOptions.date.to.options.minDate;
+      if (timeToMin.isAfter(getMomentDateWithGivenTime(vm.uiOptions.times.to.max))) {
+        return;
       }
 
-      vm.uiOptions.date.to.options.maxDate = vm._convertDateFormatFromServer(vm.period.end_date);
-    }
+      vm.uiOptions.times.to.min = timeToMin.format('HH:mm');
 
-    /**
-     * Resets data in dates, types, balance.
-     */
-    function _reset () {
-      vm.uiOptions.toDate = vm.uiOptions.fromDate;
-      vm.request.to_date_type = vm.request.from_date_type;
-      vm.request.to_date = vm.request.from_date;
-
-      vm.calculateBalanceChange();
-    }
-
-    /**
-     * Shows or hides the balance breakdown depending on various conditions
-     */
-    function _toggleBalance () {
-      var options = vm.uiOptions;
-      var request = vm.request;
-
-      if (options.multipleDays) {
-        options.showBalance = !!request.from_date && !!request.to_date && !!vm.period.id;
-
-        if (isCalculationUnit('days')) {
-          options.showBalance = options.showBalance && !!request.from_date_type && !!request.to_date_type;
-        }
-      } else {
-        options.showBalance = !!request.from_date && !!vm.period.id;
-
-        if (isCalculationUnit('days')) {
-          options.showBalance = options.showBalance && !!request.from_date_type;
-        }
+      if (timeToMin.isAfter(getMomentDateWithGivenTime(vm.uiOptions.times.to.time))) {
+        vm.uiOptions.times.to.time = '';
       }
     }
   }

@@ -6,6 +6,7 @@
           absence-periods="leaveBalanceTab.absencePeriods"
           absence-types="leaveBalanceTab.absenceTypes"
           logged-in-contact-id="leaveBalanceTab.loggedInContactId"
+          lookup-contacts="leaveBalanceTab.lookupContacts"
           user-role="leaveBalanceTab.userRole">
         </leave-balance-tab-filters>
       </div>
@@ -23,7 +24,7 @@
                 </tr>
               </thead>
               <tbody>
-                <tr ng-repeat="record in leaveBalanceTab.report">
+                <tr ng-repeat="record in leaveBalanceTab.report | orderBy: 'contact_display_name'">
                   <td>{{record.contact_display_name}}</td>
                   <td ng-repeat-start="type in leaveBalanceTab.selectedAbsenceTypes"
                      >{{ record.absence_types[type.id].entitlement | timeUnitApplier : type.calculation_unit_name }}</td>

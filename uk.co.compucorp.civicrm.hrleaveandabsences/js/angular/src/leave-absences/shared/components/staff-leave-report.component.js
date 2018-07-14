@@ -26,12 +26,16 @@ define([
   HRSettings, sharedSettings) {
     $log.debug('Component: staff-leave-report');
 
-    var requestSort = 'from_date ASC';
+    var statusUpdateHandlers = {
+      delete: removeLeaveRequestFromItsSection,
+      cancel: cancelLeaveRequestStatusHandler
+    };
     var vm = this;
 
     vm.absencePeriods = [];
-    vm.absenceTypes = {};
-    vm.absenceTypesFiltered = {};
+    vm.absenceTypes = [];
+    vm.absenceTypesFiltered = [];
+    vm.absenceTypesIndexed = {};
     vm.dateFormat = HRSettings.DATE_FORMAT;
     vm.leaveRequestStatuses = {};
     vm.selectedPeriod = null;
@@ -41,64 +45,19 @@ define([
       page: true
     };
     vm.sections = {
-      approved: { open: false, data: [], loading: false, loadFn: loadApprovedRequests },
-      entitlements: { open: false, data: [], loading: false, loadFn: loadEntitlementsBreakdown },
-      expired: { open: false, data: [], loading: false, loadFn: loadExpiredBalanceChanges },
-      holidays: { open: false, data: [], loading: false, loadFn: loadPublicHolidaysRequests },
-      pending: { open: false, data: [], loading: false, loadFn: loadPendingRequests },
-      other: { open: false, data: [], loading: false, loadFn: loadOtherRequests }
+      approved: { open: false, data: [], dataIndex: {}, loading: false, loadLeaveRequests: loadApprovedRequests },
+      entitlements: { open: false, data: [], dataIndex: {}, loading: false, loadLeaveRequests: loadEntitlementsBreakdown },
+      expired: { open: false, data: [], dataIndex: {}, loading: false, loadLeaveRequests: loadExpiredBalanceChanges },
+      holidays: { open: false, data: [], dataIndex: {}, loading: false, loadLeaveRequests: loadPublicHolidaysRequests },
+      pending: { open: false, data: [], dataIndex: {}, loading: false, loadLeaveRequests: loadPendingRequests },
+      other: { open: false, data: [], dataIndex: {}, loading: false, loadLeaveRequests: loadOtherRequests }
     };
 
-    /**
-     * Labels the given period according to whether it's current or not
-     *
-     * @param  {AbsencePeriodInstance} period
-     * @return {string}
-     */
-    vm.labelPeriod = function (period) {
-      return period.current ? 'Current Period (' + period.title + ')' : period.title;
-    };
+    vm.labelPeriod = labelPeriod;
+    vm.refresh = refresh;
+    vm.toggleSection = toggleSection;
 
-    /**
-     * Refreshes all data that is dependend on the selected absence period,
-     * and clears the cached data of closed sections
-     */
-    vm.refresh = function () {
-      vm.loading.content = true;
-
-      $q.all([
-        loadEntitlements(),
-        loadBalanceChanges()
-      ])
-      .then(function () {
-        vm.loading.content = false;
-      })
-      .then(function () {
-        return $q.all([
-          loadOpenSectionsData(),
-          clearSectionsData()
-        ]);
-      });
-    };
-
-    /**
-     * Opens/closes the given section. When opening it triggers the
-     * load function if no cached data is present
-     *
-     * @param {string} sectionName
-     */
-    vm.toggleSection = function (sectionName) {
-      var section = vm.sections[sectionName];
-      section.open = !section.open;
-
-      if (section.open && !section.data.length) {
-        callSectionLoadFn(section);
-      }
-    };
-
-    init();
-
-    function init () {
+    (function init () {
       $q.all([
         loadStatuses(),
         loadAbsenceTypes(),
@@ -118,21 +77,33 @@ define([
       });
 
       registerEvents();
+    })();
+
+    /**
+     * Adds a leave request to the provided section's data and index.
+     *
+     * @param {LeaveRequestInstance} leaveRequest - The Leave Request to add
+     *   to the section.
+     * @param {Object} section - The section object that will hold the leave
+     *   request.
+     */
+    function addLeaveRequestToSection (leaveRequest, section) {
+      section.data.push(leaveRequest);
+      section.dataIndex[leaveRequest.id] = leaveRequest;
     }
 
     /**
-     * Calls the load function of the given data, and puts the section
-     * in and out of loading mode
+     * Handles the cancel status update of leave request by removing them from
+     * their current section and adding them to the "Cancelled and Other" section
+     * in case the other section is open.
      *
-     * @param  {Object} section
-     * @return {Promise}
+     * @param {LeaveRequestInstance} leaveRequest - the leave request that
+     *   triggered the cancel status update.
      */
-    function callSectionLoadFn (section) {
-      section.loading = true;
-
-      return section.loadFn().then(function () {
-        section.loading = false;
-      });
+    function cancelLeaveRequestStatusHandler (leaveRequest) {
+      removeLeaveRequestFromItsSection(leaveRequest);
+      vm.sections.other.open && addLeaveRequestToSection(leaveRequest,
+        vm.sections.other);
     }
 
     /**
@@ -146,16 +117,40 @@ define([
     }
 
     /**
-     * NOTE: This should be just temporary, see PCHR-1810
-     * Loads all the possible statuses of a leave request
+     * Forwards the status update event to a specific status handler. If none
+     * exists for the given status, a refresh is triggered.
      *
-     * @return {Promise}
+     * @param {Object} statusUpdate - the status update event data. Contains
+     *   the status and the leave request that triggered the event.
      */
-    function loadStatuses () {
-      return OptionGroup.valuesOf('hrleaveandabsences_leave_request_status')
-        .then(function (statuses) {
-          vm.leaveRequestStatuses = _.indexBy(statuses, 'value');
-        });
+    function handleStatusUpdate (statusUpdate) {
+      var handler = statusUpdateHandlers[statusUpdate.status];
+
+      if (handler) {
+        handler(statusUpdate.leaveRequest);
+      } else {
+        vm.refresh();
+      }
+    }
+
+    /**
+     * Indexes the leave request data of a section and stores it in the
+     * dataIndex attribute.
+     *
+     * @param {Object} section - the section object that contains data to index.
+     */
+    function indexSectionData (section) {
+      section.dataIndex = _.indexBy(section.data, 'id');
+    }
+
+    /**
+     * Labels the given period according to whether it's current or not
+     *
+     * @param  {AbsencePeriodInstance} period
+     * @return {string}
+     */
+    function labelPeriod (period) {
+      return period.current ? 'Current Period (' + period.title + ')' : period.title;
     }
 
     /**
@@ -182,7 +177,8 @@ define([
       return AbsenceType.all()
         .then(AbsenceType.loadCalculationUnits)
         .then(function (absenceTypes) {
-          vm.absenceTypes = _.indexBy(absenceTypes, 'id');
+          vm.absenceTypes = absenceTypes;
+          vm.absenceTypesIndexed = _.indexBy(absenceTypes, 'id');
         });
     }
 
@@ -192,15 +188,8 @@ define([
      * @return {Promise}
      */
     function loadApprovedRequests () {
-      return LeaveRequest.all({
-        contact_id: vm.contactId,
-        from_date: { from: vm.selectedPeriod.start_date },
-        to_date: { to: vm.selectedPeriod.end_date },
-        status_id: valueOfRequestStatus(sharedSettings.statusNames.approved),
-        type_id: { IN: _.keys(vm.absenceTypes) }
-      }, null, requestSort, null, false)
-      .then(function (leaveRequests) {
-        vm.sections.approved.data = leaveRequests.list;
+      return loadLeaveRequestsForSection('approved', {
+        status_id: valueOfRequestStatus(sharedSettings.statusNames.approved)
       });
     }
 
@@ -222,9 +211,9 @@ define([
         ])
       ])
       .then(function (results) {
-        _.forEach(vm.absenceTypes, function (absenceType) {
+        vm.absenceTypes.forEach(function (absenceType) {
           absenceType.balanceChanges = {
-            publicHolidays: results[0][absenceType.id],
+            holidays: results[0][absenceType.id],
             approved: results[1][absenceType.id],
             pending: results[2][absenceType.id]
           };
@@ -249,7 +238,7 @@ define([
         vm.entitlements = entitlements;
       })
       .then(function () {
-        vm.absenceTypesFiltered = _.filter(vm.absenceTypes, function (absenceType) {
+        vm.absenceTypesFiltered = vm.absenceTypes.filter(function (absenceType) {
           var entitlement = _.find(vm.entitlements, function (entitlement) {
             return entitlement.type_id === absenceType.id;
           });
@@ -259,8 +248,8 @@ define([
           absenceType.remainder = entitlement ? entitlement.remainder : { current: 0, future: 0 };
 
           return !((absenceType.entitlement === 0) &&
-          (absenceType.allow_overuse !== '1') &&
-          (absenceType.allow_accruals_request !== '1'));
+            (absenceType.allow_overuse !== '1') &&
+            (absenceType.allow_accruals_request !== '1'));
         });
       });
     }
@@ -295,14 +284,10 @@ define([
           period_id: vm.selectedPeriod.id,
           expired: true
         }),
-        LeaveRequest.all({
-          contact_id: vm.contactId,
-          from_date: {from: vm.selectedPeriod.start_date},
-          to_date: {to: vm.selectedPeriod.end_date},
+        loadLeaveRequests({
           request_type: 'toil',
-          expired: true,
-          type_id: { IN: _.keys(vm.absenceTypes) }
-        }, null, requestSort, null, false)
+          expired: true
+        })
       ])
         .then(function (results) {
           return $q.all({
@@ -317,6 +302,40 @@ define([
     }
 
     /**
+     * Fetches leave requests for the contact, for the available absence types,
+     * for the selected period and optionally by extra parameters
+     *
+     * @param  {Object} params extra parameters for the leave requests search
+     * @return {Promise} resolves with a response from API containing leave requests
+     */
+    function loadLeaveRequests (params) {
+      return LeaveRequest.all(_.assign({
+        contact_id: vm.contactId,
+        from_date: { from: vm.selectedPeriod.start_date },
+        to_date: { to: vm.selectedPeriod.end_date },
+        type_id: {
+          IN: vm.absenceTypes.map(function (absenceType) {
+            return absenceType.id;
+          })
+        }
+      }, params), null, 'from_date ASC', null, false);
+    }
+
+    /**
+     * Loads leave requests and populates them to the given section
+     *
+     * @param  {String} section
+     * @param  {Object} params extra parameters for the leave requests search
+     * @return {Promise}
+     */
+    function loadLeaveRequestsForSection (section, params) {
+      return loadLeaveRequests(params)
+        .then(function (leaveRequests) {
+          vm.sections[section].data = leaveRequests.list;
+        });
+    }
+
+    /**
      * Loads the data of all the currently opened sections
      *
      * @return {Promise}
@@ -326,9 +345,7 @@ define([
         .filter(function (section) {
           return section.open;
         })
-        .map(function (section) {
-          return callSectionLoadFn(section);
-        }));
+        .map(loadSectionLeaveRequests));
     }
 
     /**
@@ -337,18 +354,11 @@ define([
      * @return {Promise}
      */
     function loadOtherRequests () {
-      return LeaveRequest.all({
-        contact_id: vm.contactId,
-        from_date: { from: vm.selectedPeriod.start_date },
-        to_date: { to: vm.selectedPeriod.end_date },
+      return loadLeaveRequestsForSection('other', {
         status_id: { in: [
           valueOfRequestStatus(sharedSettings.statusNames.rejected),
           valueOfRequestStatus(sharedSettings.statusNames.cancelled)
-        ] },
-        type_id: { IN: _.keys(vm.absenceTypes) }
-      }, null, requestSort, null, false)
-      .then(function (leaveRequests) {
-        vm.sections.other.data = leaveRequests.list;
+        ] }
       });
     }
 
@@ -358,37 +368,53 @@ define([
      * @return {Promise}
      */
     function loadPendingRequests () {
-      return LeaveRequest.all({
-        contact_id: vm.contactId,
-        from_date: { from: vm.selectedPeriod.start_date },
-        to_date: { to: vm.selectedPeriod.end_date },
+      return loadLeaveRequestsForSection('pending', {
         status_id: { in: [
           valueOfRequestStatus(sharedSettings.statusNames.awaitingApproval),
           valueOfRequestStatus(sharedSettings.statusNames.moreInformationRequired)
         ] },
-        type_id: { IN: _.keys(vm.absenceTypes) }
-      }, null, requestSort, null, false)
-      .then(function (leaveRequests) {
-        vm.sections.pending.data = leaveRequests.list;
       });
     }
 
     /**
-     * Loads the leave requests associated to public holidays
+     * Loads leave requests associated to public holidays
      *
      * @return {Promise}
      */
     function loadPublicHolidaysRequests () {
-      return LeaveRequest.all({
-        contact_id: vm.contactId,
-        from_date: { from: vm.selectedPeriod.start_date },
-        to_date: { to: vm.selectedPeriod.end_date },
-        public_holiday: true,
-        type_id: { IN: _.keys(vm.absenceTypes) }
-      }, null, requestSort, null, false)
-      .then(function (leaveRequests) {
-        vm.sections.holidays.data = leaveRequests.list;
+      return loadLeaveRequestsForSection('holidays', {
+        public_holiday: true
       });
+    }
+
+    /**
+     * Loads leave requests for each section, indexes the loaded data,
+     * and puts the section in and out of loading mode
+     *
+     * @param  {Object} section
+     * @return {Promise}
+     */
+    function loadSectionLeaveRequests (section) {
+      section.loading = true;
+
+      return section.loadLeaveRequests()
+        .then(indexSectionData.bind(this, section))
+        .then(function () {
+          section.loading = false;
+        });
+    }
+
+    /**
+     * NOTE: This should be just temporary, see PCHR-1810
+     * Loads all the possible statuses of a leave request
+     *
+     * @return {Promise}
+     */
+    function loadStatuses () {
+      return OptionGroup.valuesOf('hrleaveandabsences_leave_request_status')
+        .then(function (statuses) {
+          vm.leaveRequestStatuses = _.indexBy(statuses, 'value');
+        });
     }
 
     /**
@@ -446,41 +472,33 @@ define([
     function registerEvents () {
       pubSub.subscribe('LeaveRequest::new', function () { vm.refresh(); });
       pubSub.subscribe('LeaveRequest::edit', function () { vm.refresh(); });
-      pubSub.subscribe('LeaveRequest::deleted', function (leaveRequest) {
+      pubSub.subscribe('LeaveRequest::statusUpdate', handleStatusUpdate);
+      pubSub.subscribe('LeaveRequest::delete', function (leaveRequest) {
         removeLeaveRequestFromItsSection(leaveRequest);
       });
     }
 
     /**
-     * Removes the given leave request from the section it currently belongs to
-     * (only the "approved", "pending", and "other" sections support request removal)
-     *
-     * If the leave request belonged to either the "approved" or "pending" section,
-     * then the numbers of the section will be recalculated
+     * Removes the given leave request from the section it currently belongs to.
+     * After the request is removed, it recalculates the balance change
+     * for the section.
      *
      * @param  {LeaveRequestInstance} leaveRequest
-     * @param  {Boolean} moveToOther If true, it moves the leave request to
-     *         the "other" section (if the section has already cached data)
-     * @return {Promise}
      */
-    function removeLeaveRequestFromItsSection (leaveRequest, moveToOther) {
-      var sectionBelonged;
+    function removeLeaveRequestFromItsSection (leaveRequest) {
+      _.forEach(vm.sections, function (section, sectionName) {
+        var requestIndexInSection = section.dataIndex[leaveRequest.id];
 
-      ['approved', 'pending', 'other'].forEach(function (sectionName) {
-        var sections = _.remove(vm.sections[sectionName].data, function (dataEntry) {
+        if (!requestIndexInSection) {
+          return;
+        }
+
+        _.remove(section.data, function (dataEntry) {
           return dataEntry.id === leaveRequest.id;
         });
-
-        sections.length && (sectionBelonged = sectionName);
+        delete section.dataIndex[leaveRequest.id];
+        updateSectionNumbersWithLeaveRequestBalanceChange(leaveRequest, sectionName);
       });
-
-      if (sectionBelonged !== 'other') {
-        updateSectionNumbersWithLeaveRequestBalanceChange(leaveRequest, sectionBelonged);
-
-        if (moveToOther && vm.sections.other.data.length) {
-          vm.sections.other.data.push(leaveRequest);
-        }
-      }
     }
 
     /**
@@ -491,11 +509,48 @@ define([
      * @param {string} section
      */
     function updateSectionNumbersWithLeaveRequestBalanceChange (leaveRequest, section) {
-      var absenceType = vm.absenceTypes[leaveRequest.type_id];
+      var absenceType = vm.absenceTypesIndexed[leaveRequest.type_id];
       var remainderType = (section === 'pending') ? 'future' : 'current';
 
       absenceType.balanceChanges[section] -= leaveRequest.balance_change;
       absenceType.remainder[remainderType] -= leaveRequest.balance_change;
+    }
+
+    /**
+     * Refreshes all data that is dependend on the selected absence period,
+     * and clears the cached data of closed sections
+     */
+    function refresh () {
+      vm.loading.content = true;
+
+      $q.all([
+        loadEntitlements(),
+        loadBalanceChanges()
+      ])
+      .then(function () {
+        vm.loading.content = false;
+      })
+      .then(function () {
+        return $q.all([
+          loadOpenSectionsData(),
+          clearSectionsData()
+        ]);
+      });
+    }
+
+    /**
+     * Opens/closes the given section. When opening it triggers the
+     * load function if no cached data is present
+     *
+     * @param {string} sectionName
+     */
+    function toggleSection (sectionName) {
+      var section = vm.sections[sectionName];
+      section.open = !section.open;
+
+      if (section.open && !section.data.length) {
+        loadSectionLeaveRequests(section);
+      }
     }
 
     /**

@@ -371,7 +371,7 @@ function hrleaveandabsences_civicrm_tabset($tabsetName, &$tabs, $context) {
     $tabs[] = [
       'id'        => 'absence',
       'url'       => CRM_Utils_System::url('civicrm/contact/view/absence', ['cid' => $contactId]),
-      'title'     => ts('Absence'),
+      'title'     => ts('Leave'),
       'weight'    => 10
     ];
   }
@@ -434,6 +434,16 @@ function hrleaveandabsences_civicrm_validateForm($formName, &$fields, &$files, &
       $errors['relationship_type_id'] = ts('You cannot assign a contact as its own leave approver');
     }
   }
+}
+
+/**
+ * Implementation of the hook_civicrm_apiWrappers hook
+ *
+ * @param array $wrappers
+ * @param array $apiRequest
+ */
+function hrleaveandabsences_civicrm_apiWrappers(&$wrappers, $apiRequest) {
+  $wrappers[] = new CRM_HRLeaveAndAbsences_API_Wrapper_LeaveRequestDates();
 }
 
 //----------------------------------------------------------------------------//

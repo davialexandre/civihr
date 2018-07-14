@@ -1,8 +1,10 @@
+/* eslint-env amd */
+
 define([
-  'mocks/module',
-  'mocks/data/public-holiday-data',
+  'leave-absences/mocks/module',
+  'leave-absences/mocks/data/public-holiday.data',
   'common/moment',
-  'common/angularMocks',
+  'common/angularMocks'
 ], function (mocks, mockData, moment) {
   'use strict';
 
